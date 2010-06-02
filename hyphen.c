@@ -36,13 +36,13 @@
  * MPL.
  *
  */
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <stdlib.h> /* for NULL, malloc */
 #include <stdio.h>  /* for fprintf */
 #include <string.h> /* for strdup */
-
-#ifdef UNX
-#include <unistd.h> /* for exit */
-#endif
+#include <unistd.h> /* for close */
 
 #define noVERBOSE
 
@@ -230,12 +230,57 @@ get_state_str (int state)
 }
 #endif
 
+// Get a line from the dictionary contents.
+static char *
+get_line (char *s, int size, const char *dict_contents, int dict_length,
+    int *dict_ptr)
+{
+    int len = 0;
+    while (len < (size - 1) && *dict_ptr < dict_length) {
+        s[len++] = *(dict_contents + *dict_ptr);
+        (*dict_ptr)++;
+        if (s[len - 1] == '\n')
+            break;
+    }
+    s[len] = '\0';
+    if (len > 0) {
+        return s;
+    } else {
+        return NULL;
+    }
+}
+
 HyphenDict *
 hnj_hyphen_load (const char *fn)
 {
+    if (fn == NULL)
+        return NULL;
+    const int fd = open(fn, O_RDONLY);
+    if (fd == -1)
+        return NULL;
+    struct stat sb;
+    if (fstat(fd, &sb) == -1)  {  /* To obtain file size */
+        close(fd);
+        return NULL;
+    }
+
+    const char *addr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (addr == MAP_FAILED) {
+        close(fd);
+        return NULL;
+    }
+    HyphenDict *dict = hnj_hyphen_load_from_buffer(addr, sb.st_size);
+    munmap((void *)addr, sb.st_size);
+    close(fd);
+
+    return dict;
+}
+
+HyphenDict *
+hnj_hyphen_load_from_buffer (const char *dict_contents, int dict_length)
+{
     HyphenDict *dict[2];
     HashTab *hashtab;
-    FILE *f;
     char buf[MAX_CHARS];
     char word[MAX_CHARS];
     char pattern[MAX_CHARS];
@@ -249,10 +294,10 @@ hnj_hyphen_load (const char *fn)
     HashEntry *e;
     int nextlevel = 0;
 
-    f = fopen (fn, "r");
-    if (f == NULL)
+    if (dict_contents == NULL)
         return NULL;
 
+    int dict_ptr = 0;
 // loading one or two dictionaries (separated by NEXTLEVEL keyword)
     for (k = 0; k == 0 || (k == 1 && nextlevel); k++) { 
         hashtab = hnj_hash_new ();
@@ -277,7 +322,8 @@ hnj_hyphen_load (const char *fn)
         /* read in character set info */
         if (k == 0) {
             for (i=0;i<MAX_NAME;i++) dict[k]->cset[i]= 0;
-            fgets(dict[k]->cset,  sizeof(dict[k]->cset),f);
+            get_line(dict[k]->cset, sizeof(dict[k]->cset), dict_contents,
+                dict_length, &dict_ptr);
             for (i=0;i<MAX_NAME;i++)
                 if ((dict[k]->cset[i] == '\r') || (dict[k]->cset[i] == '\n'))
                     dict[k]->cset[i] = 0;
@@ -287,7 +333,8 @@ hnj_hyphen_load (const char *fn)
             dict[k]->utf8 = dict[0]->utf8;
         }
 
-        while (fgets (buf, sizeof(buf), f) != NULL)
+        while (get_line(buf, sizeof(buf), dict_contents, dict_length,
+                &dict_ptr) != NULL)
         {
             if (buf[0] != '%')
             {
@@ -446,7 +493,6 @@ hnj_hyphen_load (const char *fn)
 #endif
         state_num = 0;
     }
-    fclose(f);
     if (k == 2) dict[0]->nextlevel = dict[1];
     return dict[0];
 }
@@ -870,8 +916,8 @@ int hnj_hyphen_hyph_(HyphenDict *dict, const char *word, int word_size,
             hyphens2 = hnj_malloc (word_size);
         }
         for (i = 0; i < word_size; i++) rep2[i] = NULL;
-        for (i = 0; i < word_size; i++) if 
-                                            (hyphens[i]&1 || (begin > 0 && i + 1 == word_size)) {
+        for (i = 0; i < word_size; i++)
+            if (hyphens[i]&1 || (begin > 0 && i + 1 == word_size)) {
                 if (i - begin > 1) {
                     int hyph = 0;
                     prep_word[i + 2] = '\0';
